@@ -110,6 +110,10 @@ html,body{margin:0;padding:0;background:#184B46;-webkit-text-size-adjust:100%}
   width:calc(34px + 14px);height:calc(34px + 14px);border-radius:50%;background:#F7F9F2;
   box-shadow:inset 0 2px 4px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;z-index:1}
 .sc-center b{font-family:'Gaegu',cursive;font-size:24px;color:#1F2A1E;transform:rotate(-6deg)}
+.sc-centerbtn{border:none;padding:0;margin:0;font:inherit;cursor:pointer;transition:transform .15s,background .15s}
+.sc-centerbtn span{font-size:18px;color:#2C8637;line-height:1}
+.sc-centerbtn:hover{background:#EEF3E4}
+.sc-centerbtn:active{transform:translate(-50%,-50%) scale(.9)}
 
 .sc-slot{position:absolute;width:var(--cardsize);height:var(--cardsize);z-index:2}
 .sc-slot.s0{left:54px;top:54px}
@@ -918,6 +922,28 @@ function buildBoards(players, level, extra) {
   });
   return boards;
 }
+/* 연습모드 — 혼자 쓰고 혼자 맞혀보는 보드 하나 (방/서버 없이 메모리에서만) */
+function makePracticeBoard(level, extra) {
+  var n = Math.min(Math.max(extra || 1, 1), 3);
+  var deck = makeDeck(level);
+  var four = deck.splice(0, 4), fakes = deck.splice(0, n), cards = {};
+  four.concat(fakes).forEach(function (c) { cards[c.id] = c; });
+  return {
+    cards: cards,
+    solution: four.map(function (c) { return { cardId: c.id, rot: Math.floor(Math.random() * 4) }; }),
+    extraIds: fakes.map(function (c) { return c.id; }),
+    clues: ["", "", "", ""],
+  };
+}
+function makePracticeRound(board) {
+  return {
+    pool: shuffle(board.solution.map(function (s) { return s.cardId; }).concat(board.extraIds || [])),
+    placement: [null, null, null, null],
+    locked: [false, false, false, false],
+    attempt: 1,
+    result: null,
+  };
+}
 function makeRound(state, spectatorId) {
   var b = state.boards[spectatorId];
   return {
@@ -1092,6 +1118,11 @@ var S = {
   renaming: false,
   renameInput: "",
   chatInput: "",
+  pPhase: null,        // null | 'clue' | 'guess'
+  pBoard: null,
+  pRound: null,
+  pDeck: "all",
+  pExtra: 1,
 };
 
 var net = browserNet;
@@ -1438,7 +1469,7 @@ function viewerId() {
 /* 같은 화면인지 판별 — 바뀌었을 때만 스크롤을 올린다 */
 function screenKey() {
   var r = S.room;
-  if (!r) return "home:" + S.view;
+  if (!r) return "home:" + S.view + ":" + (S.pPhase || "") + ":" + (S.pRound && S.pRound.result ? 1 : 0);
   var b = r.boards[viewerId()];
   return [S.mode, r.phase, r.turnIndex, b && b.submitted ? 1 : 0,
     r.round && r.round.result ? 1 : 0, S.acked || ""].join("|");
@@ -1508,10 +1539,10 @@ var RULE_OK_LINE = "사람 이름이나 상표 같은 이름, 줄임말, 숫자,
 
 /* 첫 화면 = 클로버 보드. 카드 네 장이 곧 메뉴다 */
 var HOME_CARDS = [
-  ["go", "create", "방 만들기", "i1"],
-  ["go", "join", "코드로 참여", "i2"],
-  ["sheet", "rules", "게임 방법", "i3"],
-  ["go", "local", "한 기기로", "i4"],
+  ["go", "online", "온라인으로", "i1"],
+  ["go", "local", "한 기기로", "i2"],
+  ["sheet", "rules", "게임 방법", "i4"],
+  ["practiceEnter", "practice", "연습모드", "i3"],
 ];
 
 
@@ -1535,6 +1566,15 @@ function viewHome() {
       homeBoardHTML() +
       '<p class="sc-boardhint">카드를 눌러 시작하세요</p>' +
       viewResume() + viewRecordBar();
+  } else if (S.view === "practice") {
+    body = viewPractice();
+  } else if (S.view === "online") {
+    body =
+      '<div class="sc-form"><button class="sc-back" data-a="back">← 뒤로</button>' +
+      "<h2>온라인으로 하기</h2>" +
+      '<p class="sc-formdim">새 방을 만들거나, 친구가 알려준 코드로 들어가세요.</p>' +
+      '<button class="sc-btn" data-a="go" data-v="create">방 만들기</button>' +
+      '<button class="sc-btn sc-btn-alt" data-a="go" data-v="join">코드로 참여</button></div>';
   } else if (S.view === "local") {
     body =
       '<div class="sc-form"><button class="sc-back" data-a="back">← 뒤로</button>' +
@@ -1562,7 +1602,7 @@ function viewHome() {
           (S.found.phase !== "lobby" ? " (진행 중)" : "") + "</span>";
     }
     body =
-      '<div class="sc-form"><button class="sc-back" data-a="back">← 뒤로</button>' +
+      '<div class="sc-form"><button class="sc-back" data-a="go" data-v="online">← 뒤로</button>' +
       "<h2>" + (join ? "코드로 참여" : "방 만들기") + "</h2>" +
       (!ONLINE_OK
         ? '<p class="sc-warn">Firebase 설정이 비어 있어요. 지금은 같은 브라우저에서만 방이 보입니다.</p>'
@@ -1917,6 +1957,114 @@ function viewResolution() {
   return html;
 }
 
+/* ─────────── 연습모드 (혼자, 방/서버 없이) ─────────── */
+function viewPractice() {
+  var head = '<button class="sc-back" data-a="practiceExit">← 뒤로</button>' +
+    '<h2 class="sc-h2">연습모드</h2>';
+
+  if (S.pPhase === "clue") {
+    var board = S.pBoard;
+    var placed = board.solution.map(function (s) { return { card: board.cards[s.cardId], rot: s.rot }; });
+    var pairs = pairWordsOf(board);
+    var filled = S.draft.every(function (d) { return d.trim().length; });
+    var i = S.clueIdx;
+    return (
+      head +
+      '<p class="sc-dim sc-tight">점수도, 정답 확인도 없어요. 마음껏 단서를 연습해 보세요. 다 쓰면 직접 맞혀볼 수도 있어요.</p>' +
+      '<div class="sc-deck"><div class="sc-deckhead"><span>단어 난이도</span></div>' +
+      '<div class="sc-seg">' +
+      ["easy", "all", "hard"].map(function (k) {
+        return '<button class="' + (S.pDeck === k ? "on" : "") + '" data-a="practiceDeck" data-v="' + k + '">' +
+          DECK_NAMES[k] + "</button>";
+      }).join("") + "</div></div>" +
+      '<div class="sc-deck"><div class="sc-deckhead"><span>가짜 카드</span></div>' +
+      '<div class="sc-seg">' +
+      [1, 2, 3].map(function (k) {
+        return '<button class="' + (S.pExtra === k ? "on" : "") + '" data-a="practiceExtra" data-v="' + k + '">' +
+          k + "장</button>";
+      }).join("") + "</div></div>" +
+      boardHTML({ placed: placed, clues: S.draft, readOnly: true, editable: true, sel: i, centerAction: "practiceEnter", centerLabel: "다른 카드로 다시 뽑기" }) +
+      '<div class="sc-editor"><div class="sc-editnav">' +
+      '<button class="sc-arrow" data-a="prevClue" aria-label="이전 칸">‹</button>' +
+      '<div class="sc-editpair"><span class="sc-pos">' + CLUE_NAME[i] + "</span><b>" +
+      esc(pairs[i][0]) + '</b><span class="sc-plus">+</span><b>' + esc(pairs[i][1]) + "</b></div>" +
+      '<button class="sc-arrow" data-a="nextClue" aria-label="다음 칸">›</button></div>' +
+      '<input class="sc-input sc-marker' + (S.errors[i] ? " bad" : "") + '" data-f="clue" data-in="draft" data-i="' +
+      i + '" value="' + esc(S.draft[i]) + '" maxlength="14" placeholder="두 단어를 잇는 한 단어"/>' +
+      (S.errors[i] ? '<p class="sc-err">' + esc(S.errors[i]) + "</p>" : "") +
+      '<div class="sc-dots">' +
+      [0, 1, 2, 3].map(function (n) {
+        return '<button class="sc-dot' + (n === i ? " on" : "") + (S.draft[n].trim() ? " done" : "") +
+          (S.errors[n] ? " bad" : "") + '" data-a="pickClue" data-v="' + n + '" aria-label="' +
+          CLUE_NAME[n] + ' 칸"></button>';
+      }).join("") +
+      "</div></div>" +
+      '<section class="sc-rulecard"><button class="sc-howhead" data-a="ruleToggle" aria-expanded="' +
+      S.ruleOpen + '"><span>쓸 수 없는 단서</span><em>' + (S.ruleOpen ? "접기" : "펴기") + "</em></button>" +
+      (S.ruleOpen
+        ? '<div class="sc-rulebody">' + ruleListHTML() +
+          '<p class="sc-howmeta">' + RULE_OK_LINE + "</p></div>"
+        : "") +
+      "</section>" +
+      '<button class="sc-btn" data-a="practiceSubmit"' + (!filled ? " disabled" : "") + ">" +
+      (filled ? "다 썼으면 직접 맞혀보기" : "네 칸을 모두 채우세요") + "</button>"
+    );
+  }
+
+  var round = S.pRound, board2 = S.pBoard;
+  var used = round.placement.filter(Boolean).map(function (p) { return p.cardId; });
+  var tray = used.length ? round.pool.filter(function (id) { return used.indexOf(id) < 0; }) : round.pool;
+  var ready = round.placement.every(Boolean);
+  var placedView = round.placement.map(function (p) {
+    return p ? { card: board2.cards[p.cardId], rot: p.rot } : null;
+  });
+  var solutionView = board2.solution.map(function (s) {
+    return { card: board2.cards[s.cardId], rot: s.rot };
+  });
+
+  var html = head +
+    '<p class="sc-dim sc-tight">' +
+    (round.result ? "결과를 확인해 보세요." : "조금 전에 쓴 단서를 보고, 카드를 제자리에 놓아 보세요. 놓인 카드를 누르면 90°씩 돌아갑니다.") +
+    "</p>" +
+    boardHTML({
+      placed: round.result ? solutionView : placedView,
+      clues: board2.clues,
+      locked: round.locked,
+      correct: round.result ? round.result.correct : null,
+      score: round.result ? round.result.points : null,
+      readOnly: !!round.result,
+      picked: S.picked,
+      write: true,
+      slotAction: "practiceSlot",
+      pullAction: "practicePull",
+    });
+
+  if (!round.result) {
+    html +=
+      '<div class="sc-tray">' +
+      (tray.length
+        ? tray.map(function (id) {
+            return '<button class="sc-traycard' + (S.picked === id ? " picked" : "") +
+              '" data-a="practicePick" data-v="' + id + '"><div class="sc-minicard">' +
+              faceHTML(board2.cards[id], 0, null, "pmini" + id) + "</div></button>";
+          }).join("")
+        : '<p class="sc-dim">남은 카드 없음</p>') +
+      "</div>" +
+      '<button class="sc-btn" data-a="practiceCheck"' + (ready ? "" : " disabled") + ">" +
+      (ready ? "이대로 확인" : "네 칸을 모두 채우세요") + "</button>";
+  }
+
+  if (round.result) {
+    html +=
+      '<div class="sc-result"><p class="sc-score">' + round.result.points + "점" +
+      (round.result.perfect ? "<em>첫 시도에 전부 정답</em>" : "") + "</p>" +
+      '<button class="sc-btn" data-a="practiceAgain">새 카드로 다시 연습</button>' +
+      '<button class="sc-mini-btn sc-light" data-a="practiceExit">연습모드 나가기</button>' +
+      "</div>";
+  }
+  return html;
+}
+
 /* ─────────── 결과 ─────────── */
 function viewEnd() {
   if (S.review) return viewReview();
@@ -2036,24 +2184,25 @@ function faceHTML(card, rot, out, key) {
 
 function boardHTML(o) {
   var locked = o.locked || [false, false, false, false];
+  var slotAct = o.slotAction || "slot", pullAct = o.pullAction || "pull";
   var slots = [0, 1, 2, 3].map(function (slot) {
     var p = o.placed[slot];
     var state = o.correct ? (o.correct[slot] ? "ok" : "no") : locked[slot] ? "lock" : "";
     var inner;
     if (p) {
       inner =
-        '<button class="sc-card ' + state + (o.correct ? " reveal" : "") + '" data-a="slot" data-v="' + slot +
+        '<button class="sc-card ' + state + (o.correct ? " reveal" : "") + '" data-a="' + slotAct + '" data-v="' + slot +
         '"' + (o.readOnly ? " disabled" : "") + ">" +
         faceHTML(p.card, p.rot, OUT_EDGES[slot], "s" + slot) +
         (!o.readOnly && !locked[slot] ? '<span class="sc-turnhint">↻</span>' : "") +
         (o.correct ? '<span class="sc-verdict">' + (o.correct[slot] ? "○" : "×") + "</span>" : "") +
         "</button>" +
         (!o.readOnly && !locked[slot]
-          ? '<button class="sc-pull" data-a="pull" data-v="' + slot + '" aria-label="카드 빼기">×</button>'
+          ? '<button class="sc-pull" data-a="' + pullAct + '" data-v="' + slot + '" aria-label="카드 빼기">×</button>'
           : "");
     } else {
       inner =
-        '<button class="sc-empty' + (o.picked ? " hot" : "") + '" data-a="slot" data-v="' + slot + '"' +
+        '<button class="sc-empty' + (o.picked ? " hot" : "") + '" data-a="' + slotAct + '" data-v="' + slot + '"' +
         (o.readOnly ? " disabled" : "") + ">" + (o.picked ? "여기" : "") + "</button>";
     }
     return '<div class="sc-slot s' + slot + '"><span class="sc-notch"></span>' + inner + "</div>";
@@ -2071,7 +2220,12 @@ function boardHTML(o) {
   return (
     '<div class="sc-boardwrap"><div class="sc-board">' + cloverPlate() +
     '<span class="sc-stem"></span>' +
-    (o.score != null ? '<div class="sc-center"><b>' + o.score + "</b></div>" : "") +
+    (o.score != null
+      ? '<div class="sc-center"><b>' + o.score + "</b></div>"
+      : o.centerAction
+      ? '<button class="sc-center sc-centerbtn" data-a="' + o.centerAction + '" aria-label="' +
+        (o.centerLabel || "다시 뽑기") + '"><span>↻</span></button>'
+      : "") +
     slots + clues + "</div></div>"
   );
 }
@@ -2345,6 +2499,100 @@ var actions = {
       return s;
     });
   },
+
+  /* ── 연습모드: 방/서버 없이 혼자, 메모리에서만 ── */
+  practiceEnter: function () {
+    S.view = "practice";
+    S.pPhase = "clue";
+    S.pBoard = makePracticeBoard(S.pDeck, S.pExtra);
+    S.pRound = null;
+    S.draft = ["", "", "", ""];
+    S.errors = ["", "", "", ""];
+    S.clueIdx = 0;
+    S.picked = null;
+    render();
+  },
+  practiceDeck: function (v) {
+    if (S.pPhase !== "clue") return;
+    S.pDeck = v;
+    S.pBoard = makePracticeBoard(S.pDeck, S.pExtra);
+    S.draft = ["", "", "", ""];
+    S.errors = ["", "", "", ""];
+    S.clueIdx = 0;
+    render();
+  },
+  practiceExtra: function (v) {
+    if (S.pPhase !== "clue") return;
+    S.pExtra = +v;
+    S.pBoard = makePracticeBoard(S.pDeck, S.pExtra);
+    S.draft = ["", "", "", ""];
+    S.errors = ["", "", "", ""];
+    S.clueIdx = 0;
+    render();
+  },
+  practiceSubmit: function () {
+    var pairs = pairWordsOf(S.pBoard);
+    var verdict = basicJudge(pairs, S.draft);
+    S.errors = ["", "", "", ""];
+    if (verdict.some(Boolean)) {
+      S.errors = verdict;
+      return notice("규칙에 어긋나는 단서가 있어요. 고친 뒤 다시 확인해 보세요.");
+    }
+    S.pBoard.clues = S.draft.map(function (d) { return d.trim().slice(0, 14); });
+    S.draft = ["", "", "", ""];
+    S.errors = ["", "", "", ""];
+    S.pRound = makePracticeRound(S.pBoard);
+    S.pPhase = "guess";
+    S.picked = null;
+    render();
+  },
+  practicePick: function (id) { S.picked = S.picked === id ? null : id; render(); },
+  practiceSlot: function (v) {
+    var slot = +v, r = S.pRound;
+    if (!r || r.result || r.locked[slot]) return;
+    if (r.placement[slot]) {
+      r.placement[slot].rot = (r.placement[slot].rot + 1) % 4;
+      render();
+    } else if (S.picked) {
+      if (r.placement.some(function (q) { return q && q.cardId === S.picked; })) return;
+      r.placement[slot] = { cardId: S.picked, rot: 0 };
+      S.picked = null;
+      render();
+    }
+  },
+  practicePull: function (v) {
+    var slot = +v, r = S.pRound;
+    if (!r || r.result || r.locked[slot] || !r.placement[slot]) return;
+    r.placement[slot] = null;
+    render();
+  },
+  practiceCheck: function () {
+    var r = S.pRound;
+    if (!r || r.result || r.placement.some(function (q) { return !q; })) return;
+    var sol = S.pBoard.solution;
+    var correct = r.placement.map(function (p, i) {
+      return !!p && p.cardId === sol[i].cardId && p.rot === sol[i].rot;
+    });
+    if (r.attempt === 1 && correct.every(Boolean)) {
+      r.result = { points: 6, perfect: true, correct: correct };
+    } else if (r.attempt === 1) {
+      correct.forEach(function (ok, i) {
+        if (ok) r.locked[i] = true; else r.placement[i] = null;
+      });
+      r.attempt = 2;
+    } else {
+      r.result = { points: correct.filter(Boolean).length, perfect: false, correct: correct };
+    }
+    render();
+  },
+  practiceAgain: function () { actions.practiceEnter(); },
+  practiceExit: function () {
+    S.view = "menu";
+    S.pPhase = null;
+    S.pBoard = null;
+    S.pRound = null;
+    render();
+  },
 };
 
 /* ─────────── 이벤트 위임 ─────────── */
@@ -2378,11 +2626,13 @@ function bind() {
         var er = root.querySelector(".sc-editor .sc-err");
         if (er) er.remove();
       }
-      var btn = root.querySelector('[data-a="submitClues"]');
+      var btn = root.querySelector('[data-a="submitClues"]') || root.querySelector('[data-a="practiceSubmit"]');
       if (btn) {
         var all = S.draft.every(function (d) { return d.trim().length; });
         btn.disabled = !all;
-        btn.textContent = all ? "단서 제출" : "네 칸을 모두 채우세요";
+        btn.textContent = all
+          ? (btn.dataset.a === "practiceSubmit" ? "다 썼으면 직접 맞혀보기" : "단서 제출")
+          : "네 칸을 모두 채우세요";
       }
       lastHTML = "";   // 직접 손댔으니 다음 render 는 반드시 다시 그린다
     } else if (kind === "chat") {
@@ -2409,6 +2659,7 @@ function bind() {
         if (!S.draft[k].trim()) { empty = k; break; }
       }
       if (empty >= 0) actions.pickClue(empty);
+      else if (S.view === "practice") actions.practiceSubmit();
       else submitClues();
     }
   });
