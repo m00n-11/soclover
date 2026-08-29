@@ -1451,6 +1451,9 @@ function leaveRoom() {
       st.players = st.players.filter(function (p) { return p.id !== myId; });
       if (st.hostId === myId && st.players[0]) st.hostId = st.players[0].id;
       return st;
+    }).catch(function () {
+      /* 서버 저장이 실패하거나 네트워크 오류가 나도, 이 화면은 반드시 방을 나가야 한다.
+         (원격 동기화가 안 됐을 수는 있지만, 사용자가 방에 갇혀 있으면 안 된다.) */
     });
   }
   return done.then(function () {
@@ -2671,9 +2674,9 @@ function bind() {
       }
       lastHTML = "";   // 직접 손댔으니 다음 render 는 반드시 다시 그린다
     } else if (kind === "chat") {
-      var was = !!S.chatInput.trim();
       S.chatInput = el.value;
-      if (was !== !!el.value.trim()) render();
+      var sbtn = root.querySelector('[data-a="send"]');
+      if (sbtn) sbtn.disabled = !el.value.trim();
     } else if (kind === "code") {
       el.value = el.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
       S.codeInput = el.value;
