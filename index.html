@@ -48,6 +48,8 @@ html,body{margin:0;padding:0;background:#184B46;-webkit-text-size-adjust:100%}
   box-shadow:var(--lift)}
 .sc-form h2{font-family:'Jua',sans-serif;font-weight:400;font-size:20px;color:var(--green-d);margin:6px 0 4px}
 .sc-back{background:transparent;border:0;padding:0;color:var(--dim);font-family:inherit;font-size:13px;cursor:pointer}
+.sc-back.sc-backw{color:#EAF3E0;opacity:.85}
+.sc-back.sc-backw:hover{opacity:1}
 .sc-formdim{font-size:13px;color:var(--dim);line-height:1.7;margin:0 0 12px}
 .sc-warn{background:#FFF3D6;border-left:4px solid var(--gold);border-radius:var(--r-sm);padding:10px 11px;
   font-size:13px;color:#6B5410;line-height:1.6;margin:10px 0 14px}
@@ -1400,6 +1402,29 @@ function readLastRoom() {
   } catch (e) { return null; }
 }
 
+/* 초대 링크: ?r=코드 로 들어오면 코드로 참여 화면에 자동으로 채워준다 */
+function readInviteCode() {
+  try {
+    var qs = new URLSearchParams(location.search);
+    var c = (qs.get("r") || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+    return c.length === 4 ? c : null;
+  } catch (e) { return null; }
+}
+function inviteLink(code) {
+  return location.origin + location.pathname + "?r=" + code;
+}
+function copyInviteLink() {
+  if (!S.room) return;
+  var link = inviteLink(S.room.code);
+  var done = function () { notice("초대 링크를 복사했어요."); };
+  var fail = function () { notice(link); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(link).then(done, fail);
+  } else {
+    fail();
+  }
+}
+
 function startLocal() {
   var list = S.locals.map(function (l) { return l.trim(); }).filter(Boolean);
   if (list.length < 2) return notice("이름을 두 명 이상 적어주세요.");
@@ -1790,7 +1815,8 @@ function viewLobby() {
         }).join("") + "</div>"
       : "") +
     '<p class="sc-deckhint">' + EXTRA_HINTS[r.extra || 1] + "</p></div>" +
-    (!isLocal ? '<p class="sc-dim">코드를 친구에게 알려주세요. “코드로 참여”로 들어옵니다.</p>' : "") +
+    (!isLocal ? '<p class="sc-dim">코드를 친구에게 알려주세요. “코드로 참여”로 들어오거나, 아래 링크를 보내면 코드까지 자동으로 채워져요.</p>' +
+      '<button class="sc-mini-btn sc-light" data-a="copyInvite">🔗 초대 링크 복사</button>' : "") +
     (isHost
       ? '<button class="sc-btn" data-a="start"' + (r.players.length < 2 ? " disabled" : "") + ">" +
         (r.players.length < 2 ? "2명부터 시작할 수 있어요" : "게임 시작") + "</button>"
@@ -1959,7 +1985,7 @@ function viewResolution() {
 
 /* ─────────── 연습모드 (혼자, 방/서버 없이) ─────────── */
 function viewPractice() {
-  var head = '<button class="sc-back" data-a="practiceExit">← 뒤로</button>' +
+  var head = '<button class="sc-back sc-backw" data-a="practiceExit">← 뒤로</button>' +
     '<h2 class="sc-h2">연습모드</h2>';
 
   if (S.pPhase === "clue") {
@@ -2102,7 +2128,7 @@ function viewReview() {
   var next = r.order[(i + 1) % r.order.length];
 
   return (
-    '<button class="sc-back" data-a="closeReview">← 점수판</button>' +
+    '<button class="sc-back sc-backw" data-a="closeReview">← 점수판</button>' +
     '<div class="sc-reviewhead"><button class="sc-arrow" data-a="review" data-v="' + prev + '">‹</button>' +
     "<div><b>" + esc(p ? p.name : "") + "의 클로버</b><em>" +
     (res ? res.points + "점" : "-") + "</em></div>" +
@@ -2365,6 +2391,7 @@ var actions = {
     enterRoom(S.lastRoom.code, false);
   },
   join: joinRoom,
+  copyInvite: copyInviteLink,
   leave: leaveRoom,
   ack: function (v) { S.acked = v; render(); },
   rename: function () { S.renaming = true; S.renameInput = (S.me && S.me.name) || ""; render(); },
@@ -2609,7 +2636,15 @@ function bind() {
     var el = e.target;
     var kind = el.dataset && el.dataset.in;
     if (!kind) return;
-    if (kind === "name") S.nameInput = el.value;
+    if (kind === "name") {
+      S.nameInput = el.value;
+      var cbtn = root.querySelector('[data-a="create"]') || root.querySelector('[data-a="join"]');
+      if (cbtn) {
+        var isJoin = cbtn.dataset.a === "join";
+        var rOk = S.found && S.found !== "searching" && S.found !== "none";
+        cbtn.disabled = !el.value.trim() || (isJoin && !rOk);
+      }
+    }
     else if (kind === "rename") S.renameInput = el.value;
     else if (kind === "local") S.locals[+el.dataset.i] = el.value;
     else if (kind === "draft") {
@@ -2692,6 +2727,19 @@ function boot() {
   S.legends = readLegends();
   S.lastRoom = readLastRoom();
   bind();
+
+  var invite = readInviteCode();
+  if (invite) {
+    try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {}
+    S.codeInput = invite;
+    S.view = "join";
+    if (S.me && S.me.name) {
+      enterRoom(invite, false);
+    } else {
+      lookupRoom();
+    }
+  }
+
   render();
   if (FIREBASE_CONFIG) {
     makeFirebaseNet()
